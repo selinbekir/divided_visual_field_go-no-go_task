@@ -1,0 +1,598 @@
+---
+title: "Linear Mixed Models for Reaction Time Scores"
+author: "Selin Bekir"
+date: "March 16, 2022"
+output: html_notebook
+---
+
+```{r}
+  source('~/theme_Publication.R')
+  require(lme4)
+  require(merTools)
+  require(ggplot2)
+  require(broom)
+  require(sjPlot)
+  require(sjmisc)
+  require(effects)
+  require(predictmeans)
+  require(dplyr)
+  require(tidyr)
+  require(car)
+  require(MuMIn)
+  require(emmeans)
+```
+
+load the data
+```{r}
+df <- read.csv("~/divided_visual_field_go-no-go_task/Data/all-clean.csv")
+
+#only getting right-handed people
+df <- filter(df, handedness >= 20)
+
+#factoring the labels
+df <- df %>% mutate(run_id = factor(run_id)) 
+levels(df$main) <- c('inhibit', 'respond')
+levels(df$cond) <- c('LVF', 'BOTH', 'RVF')
+levels(df$target_shown)  <- c('pink', 'green')
+```
+
+RT scores will be analyzed separately for:
+- Inhibit Version, no-go (rare pink targets), incorrect trials
+- Inhibit Version, go (common green targets), correct trials
+- Respond Version, go (rare pink targets), correct trials
+- Respond Version, no-go (common green targets), incorrect trials
+```{r}
+df_inhibit <- filter(df, main == 'inhibit')
+df_respond <- filter(df, main == 'respond')
+
+df_inhibit_pink_incorr <- filter(df_inhibit, target_shown == 'pink' & accuracy == 0)
+df_inhibit_green_corr <- filter(df_inhibit, target_shown == 'green' & accuracy == 1)
+df_respond_pink_corr <- filter(df_respond, target_shown == 'pink' & accuracy == 1)
+df_respond_green_incorr <- filter(df_respond, target_shown == 'green' & accuracy == 0)
+```
+
+# checking the data
+```{r}
+summary(df_inhibit_pink_incorr$rt)
+summary(df_inhibit_green_corr$rt)
+summary(df_respond_pink_corr$rt)
+summary(df_respond_green_incorr$rt)
+```
+
+#1. Inhibit, incorrect nogo trials
+## first let's check the summary stats per VF condition
+```{r}
+group_by(df_inhibit_pink_incorr, cond) %>%
+  summarise(
+    count = n(),
+    mean = mean(rt, na.rm = TRUE),
+    sd = sd(rt, na.rm = TRUE),
+    median = median(rt, na.rm = TRUE),
+    IQR = IQR(rt, na.rm = TRUE)
+  )
+```
+## Secondly, let's do a standard linear model with including subjects as a fixed effect.
+DV: rt
+IV1: cond (LVF, BOTH, RVF)
+IV2: subjects. run_id
+```{r}
+inhibit_incorr_fixedLM <- lm(rt ~ cond * run_id, data = df_inhibit_pink_incorr)
+anova(inhibit_incorr_fixedLM)
+  # This suggests there is indeed variation by subject,
+  # probably in slopes as well as intercept.
+```
+
+## Now we will check for some assumptions to see if we need to transform the data
+residual variance should be normally distributed 
+in LMM parameter optimization relies on a Gaussian 'likelihood' function. 
+So, let's plot some quick model diagnostics to check this assumption.
+```{r}
+par(mfrow = c(2, 2))
+plot(inhibit_incorr_fixedLM)
+
+#clearly heavily right-skewed. 
+#We should therefore transform our response variable in order to normalize the residuals. 
+#We can check for possible transformations using Box-Cox.
+
+par(mfrow = c(1,1))
+boxCox(inhibit_incorr_fixedLM)
+powerTransform(inhibit_incorr_fixedLM)
+
+#The likelihood function peaks near 0.5. According to the following guidelines, we'll do sqrt transformation
+  #   LAMBDA | TRANSFORMATION
+  #        2 = y^2
+  #        1 = no transformation
+  #      0.5 = sqrt(y)
+  #        0 = log(y)
+  #     -0.5 = 1/sqrt(y)
+  #       -1 = 1/y
+
+df_inhibit_pink_incorr <- mutate(df_inhibit_pink_incorr, sqrt_rt = sqrt(rt))
+
+# Let's check whether a model using sqrt_rt instead of RT has nicer residuals.
+inhibit_incorr_sqrt_LM <- lm(sqrt_rt ~ cond * run_id, data = df_inhibit_pink_incorr)
+par(mfrow = c(2, 2))
+plot(inhibit_incorr_sqrt_LM )
+#still right skewed, but better.
+
+#let's also check the distributions of rts and the transformed sqrt_rt
+hist(df_inhibit_pink_incorr$rt)
+hist(df_inhibit_pink_incorr$sqrt_rt)
+```
+## Now the LMM specifications with the following effects:
+DV: sqrt_rt
+IV1: cond (BOTH, LVF, RVF), fixed effect
+IV2: random effects of subjects
+```{r}
+inhibit_incorr_lmm <- lmer(sqrt_rt ~ cond + (1|run_id), data = df_inhibit_pink_incorr)
+summary(inhibit_incorr_lmm)
+confint(inhibit_incorr_lmm)
+```
+
+let's check for possible outliers
+```{r}
+#we first identify them
+modelResiduals <- resid(inhibit_incorr_lmm)
+badID<- which(abs(modelResiduals - median(modelResiduals))/mad(modelResiduals) > 3)
+length(badID)
+#how many percent of our data consist of them?
+100 * length(badID)/length(modelResiduals) #2.6%
+
+#let's remove them and check our model again
+datClean_inhibit_pink <- df_inhibit_pink_incorr[-badID,]
+
+inhibit_incorr_lmm_clean <- lmer(sqrt_rt ~ cond + (1|run_id), data = datClean_inhibit_pink )
+summary(inhibit_incorr_lmm_clean)
+confint(inhibit_incorr_lmm_clean)
+```
+Estimated effect sizes
+```{r}
+0.4077 / sqrt(1.274 + 2.575)
+```
+
+Checking pairwise comparisons of VF conditions
+```{r}
+emmeans(inhibit_incorr_lmm_clean, list(pairwise ~ cond), adjust = "tukey")
+# it seems like BOTH sign. differs from RVF but not from LVF. 
+```
+
+```{r}
+  fixedEffects <- FEsim(inhibit_incorr_lmm_clean, 1000)
+  fixedEffects <- fixedEffects %>%
+    mutate(lwr = mean - 1.96 * sd, 
+           upr = mean + 1.96 * sd)
+  
+    ggplot(fixedEffects, aes(x = term, y = mean, 
+                           ymin = lwr, ymax = upr)) +
+    geom_pointrange() + 
+    geom_hline(yintercept = 0, color = 'red') +
+    ylab('Posterior mean') + xlab('Term') +
+    coord_flip() +
+    theme_Publication()
+    
+    fixedEffects <- fixedEffects[-1,]
+    ggplot(fixedEffects, aes(x = term, y = mean, ymin = lwr, ymax = upr)) + 
+      geom_pointrange() + 
+      geom_hline(yintercept = 0, color = 'red') +
+      ylab('Posterior mean') + xlab('Term') +
+      coord_flip() + theme_Publication()
+```
+
+```{r}
+  modelEffects <- allEffects(inhibit_incorr_lmm_clean)
+  modelEffects <- as.data.frame(modelEffects[[1]])  
+  ggplot(data = modelEffects, aes(x = cond, y = fit, 
+                                  ymin = lower, ymax = upper, 
+                                  colour = cond, group = cond)) +
+    geom_point() +
+    geom_line() +
+    geom_errorbar(width = 0.2) +
+    scale_color_discrete(name = 'VF Condition') +
+    ylab('Fit') + xlab('Condition') +
+    theme_Publication()
+```
+
+#2. Respond, correct go trials
+## first let's check the summary stats per VF condition
+```{r}
+group_by(df_inhibit_green_corr, cond) %>%
+  summarise(
+    count = n(),
+    mean = mean(rt, na.rm = TRUE),
+    sd = sd(rt, na.rm = TRUE),
+    median = median(rt, na.rm = TRUE),
+    IQR = IQR(rt, na.rm = TRUE)
+  )
+```
+## Secondly, let's do a standard linear model with including subjects as a fixed effect.
+DV: rt
+IV1: cond (LVF, BOTH, RVF)
+IV2: subjects. run_id
+```{r}
+inhibit_corr_fixedLM <- lm(rt ~ cond * run_id, data = df_inhibit_green_corr)
+anova(inhibit_corr_fixedLM)
+  # This suggests there is indeed variation by subject,
+  # probably in slopes as well as intercept.
+```
+
+## Now we will check for some assumptions to see if we need to transform the data
+residual variance should be normally distributed 
+in LMM parameter optimization relies on a Gaussian 'likelihood' function. 
+So, let's plot some quick model diagnostics to check this assumption.
+```{r}
+par(mfrow = c(2, 2))
+plot(inhibit_corr_fixedLM)
+
+#it is right-skewed. 
+#We can check for possible transformations using Box-Cox.
+
+par(mfrow = c(1,1))
+boxCox(inhibit_corr_fixedLM)
+powerTransform(inhibit_corr_fixedLM)
+
+#The likelihood function peaks near 0.5. According to the following guidelines, we'll do sqrt transformation
+  #   LAMBDA | TRANSFORMATION
+  #        2 = y^2
+  #        1 = no transformation
+  #      0.5 = sqrt(y)
+  #        0 = log(y)
+  #     -0.5 = 1/sqrt(y)
+  #       -1 = 1/y
+
+df_inhibit_green_corr <- mutate(df_inhibit_green_corr, sqrt_rt = sqrt(rt))
+
+# Let's check whether a model using sqrt_rt instead of RT has nicer residuals.
+inhibit_corr_sqrt_LM <- lm(sqrt_rt ~ cond * run_id, data = df_inhibit_green_corr)
+par(mfrow = c(2, 2))
+plot(inhibit_corr_sqrt_LM)
+#still right skewed, but better.
+
+#let's also check the distributions of rts and the transformed sqrt_rt
+hist(df_inhibit_green_corr$rt)
+hist(df_inhibit_green_corr$sqrt_rt)
+```
+## Now the LMM specifications with the following effects:
+DV: sqrt_rt
+IV1: cond (BOTH, LVF, RVF), fixed effect
+IV2: random effects of subjects
+```{r}
+inhibit_corr_lmm <- lmer(sqrt_rt ~ cond + (1|run_id), data = df_inhibit_green_corr)
+summary(inhibit_corr_lmm)
+```
+
+let's check for possible outliers
+```{r}
+#we first identify them
+modelResiduals <- resid(inhibit_corr_lmm)
+badID<- which(abs(modelResiduals - median(modelResiduals))/mad(modelResiduals) > 3)
+length(badID)
+#how many percent of our data consist of them?
+100 * length(badID)/length(modelResiduals) # 2.6%
+
+#let's remove them and check our model again
+datClean_inhibit_green <- df_inhibit_green_corr[-badID,]
+
+inhibit_corr_lmm_clean <- lmer(sqrt_rt ~ cond + (1|run_id), data = datClean_inhibit_green )
+summary(inhibit_corr_lmm_clean)
+confint(inhibit_corr_lmm_clean)
+```
+
+estimated effect size
+```{r}
+0.44010 / sqrt(0.9988 + 2.7292 )
+0.3102227 / sqrt(0.9988 + 2.7292 )
+```
+
+Checking pairwise comparisons of VF conditions
+```{r}
+emmeans(inhibit_corr_lmm_clean, list(pairwise ~ cond), adjust = "tukey")
+# it seems like BOTH sign. differs from RVF and LVF. 
+```
+
+```{r}
+  fixedEffects <- FEsim(inhibit_corr_lmm_clean, 1000)
+  fixedEffects <- fixedEffects %>%
+    mutate(lwr = mean - 1.96 * sd, 
+           upr = mean + 1.96 * sd)
+  
+    ggplot(fixedEffects, aes(x = term, y = mean, 
+                           ymin = lwr, ymax = upr)) +
+    geom_pointrange() + 
+    geom_hline(yintercept = 0, color = 'red') +
+    ylab('Posterior mean') + xlab('Term') +
+    coord_flip() +
+    theme_Publication()
+    
+    fixedEffects <- fixedEffects[-1,]
+    ggplot(fixedEffects, aes(x = term, y = mean, ymin = lwr, ymax = upr)) + 
+      geom_pointrange() + 
+      geom_hline(yintercept = 0, color = 'red') +
+      ylab('Posterior mean') + xlab('Term') +
+      coord_flip() + theme_Publication()
+```
+
+```{r}
+  modelEffects <- allEffects(inhibit_corr_lmm_clean)
+  modelEffects <- as.data.frame(modelEffects[[1]])  
+  ggplot(data = modelEffects, aes(x = cond, y = fit, 
+                                  ymin = lower, ymax = upper, 
+                                  colour = cond, group = cond)) +
+    geom_point() +
+    geom_line() +
+    geom_errorbar(width = 0.2) +
+    scale_color_discrete(name = 'VF Condition') +
+    ylab('Fit') + xlab('Condition') +
+    theme_Publication()
+```
+
+#3. Respond, correct go (pink) trials
+## first let's check the summary stats per VF condition
+```{r}
+group_by(df_respond_pink_corr, cond) %>%
+  summarise(
+    count = n(),
+    mean = mean(rt, na.rm = TRUE),
+    sd = sd(rt, na.rm = TRUE),
+    median = median(rt, na.rm = TRUE),
+    IQR = IQR(rt, na.rm = TRUE)
+  )
+```
+
+## Secondly, let's do a standard linear model with including subjects as a fixed effect.
+DV: rt
+IV1: cond (LVF, BOTH, RVF)
+IV2: subjects. run_id
+```{r}
+respond_corr_fixedLM <- lm(rt ~ cond * run_id, data = df_respond_pink_corr)
+anova(respond_corr_fixedLM )
+  # This suggests there is indeed variation by subject,
+  # probably in slopes as well as intercept.
+```
+
+## Now we will check for some assumptions to see if we need to transform the data
+residual variance should be normally distributed 
+in LMM parameter optimization relies on a Gaussian 'likelihood' function. 
+So, let's plot some quick model diagnostics to check this assumption.
+```{r}
+par(mfrow = c(2, 2))
+plot(respond_corr_fixedLM)
+
+#this data is not very much skewed but as seen below in the (hist) distribution, we did sqrt transform anyway to make this set in the same units as the other 3 
+par(mfrow = c(1,1))
+boxCox(respond_corr_fixedLM)
+powerTransform(respond_corr_fixedLM)
+
+#The likelihood function peaks near 0.5. According to the following guidelines, we'll do sqrt transformation
+  #   LAMBDA | TRANSFORMATION
+  #        2 = y^2
+  #        1 = no transformation
+  #      0.5 = sqrt(y)
+  #        0 = log(y)
+  #     -0.5 = 1/sqrt(y)
+  #       -1 = 1/y
+
+df_respond_pink_corr <- mutate(df_respond_pink_corr, sqrt_rt = sqrt(rt))
+
+# Let's check whether a model using sqrt_rt instead of RT has nicer residuals.
+respond_corr_sqrt_LM <- lm(sqrt_rt ~ cond * run_id, data = df_respond_pink_corr)
+par(mfrow = c(2, 2))
+plot(respond_corr_sqrt_LM )
+#still right skewed, but better.
+
+#let's also check the distributions of rts and the transformed sqrt_rt
+hist(df_respond_pink_corr$rt)
+hist(df_respond_pink_corr$sqrt_rt)
+```
+## Now the LMM specifications with the following effects:
+DV: sqrt_rt
+IV1: cond (BOTH, LVF, RVF), fixed effect
+IV2: random effects of subjects
+```{r}
+respond_corr_lmm <- lmer(sqrt_rt ~ cond + (1|run_id), data = df_respond_pink_corr)
+summary(respond_corr_lmm)
+```
+
+let's check for possible outliers
+```{r}
+#we first identify them
+modelResiduals <- resid(respond_corr_lmm)
+badID<- which(abs(modelResiduals - median(modelResiduals))/mad(modelResiduals) > 3)
+length(badID)
+#how many percent of our data consist of them?
+100 * length(badID)/length(modelResiduals) # 2.2%
+
+#let's remove them and check our model again
+datClean_respond_pink <- df_respond_pink_corr[-badID,]
+
+respond_corr_lmm_clean <- lmer(sqrt_rt ~ cond + (1|run_id), data = datClean_respond_pink)
+summary(respond_corr_lmm_clean)
+confint(respond_corr_lmm_clean)
+```
+estimates effect size
+```{r}
+0.45003 / sqrt(0.9482 + 1.7768)
+0.43712 / sqrt(0.9482 + 1.7768)
+```
+
+Checking pairwise comparisons of VF conditions
+```{r}
+emmeans(respond_corr_lmm_clean, list(pairwise ~ cond), adjust = "tukey")
+# it seems like BOTH sign. differs from RVF and LVF. 
+```
+
+```{r}
+  fixedEffects <- FEsim(respond_corr_lmm_clean, 1000)
+  fixedEffects <- fixedEffects %>%
+    mutate(lwr = mean - 1.96 * sd, 
+           upr = mean + 1.96 * sd)
+  
+    ggplot(fixedEffects, aes(x = term, y = mean, 
+                           ymin = lwr, ymax = upr)) +
+    geom_pointrange() + 
+    geom_hline(yintercept = 0, color = 'red') +
+    ylab('Posterior mean') + xlab('Term') +
+    coord_flip() +
+    theme_Publication()
+    
+    fixedEffects <- fixedEffects[-1,]
+    ggplot(fixedEffects, aes(x = term, y = mean, ymin = lwr, ymax = upr)) + 
+      geom_pointrange() + 
+      geom_hline(yintercept = 0, color = 'red') +
+      ylab('Posterior mean') + xlab('Term') +
+      coord_flip() + theme_Publication()
+```
+
+```{r}
+  modelEffects <- allEffects(respond_corr_lmm_clean)
+  modelEffects <- as.data.frame(modelEffects[[1]])  
+  ggplot(data = modelEffects, aes(x = cond, y = fit, 
+                                  ymin = lower, ymax = upper, 
+                                  colour = cond, group = cond)) +
+    geom_point() +
+    geom_line() +
+    geom_errorbar(width = 0.2) +
+    scale_color_discrete(name = 'VF Condition') +
+    ylab('Fit') + xlab('Condition') +
+    theme_Publication()
+```
+
+#4. respond, incorrect nogo (green) trials
+## first let's check the summary stats per VF condition
+```{r}
+group_by(df_respond_green_incorr, cond) %>%
+  summarise(
+    count = n(),
+    mean = mean(rt, na.rm = TRUE),
+    sd = sd(rt, na.rm = TRUE),
+    median = median(rt, na.rm = TRUE),
+    IQR = IQR(rt, na.rm = TRUE)
+  )
+
+#the number of trials are so small. So, the following analysis should be interpreted with caution
+```
+## Secondly, let's do a standard linear model with including subjects as a fixed effect.
+DV: rt
+IV1: cond (LVF, BOTH, RVF)
+IV2: subjects. run_id
+```{r}
+respond_incorr_fixedLM <- lm(rt ~ cond * run_id, data = df_respond_green_incorr)
+anova(respond_incorr_fixedLM)
+  # This suggests there is indeed variation by subject,
+  # probably in slopes as well as intercept.
+```
+
+## Now we will check for some assumptions to see if we need to transform the data
+residual variance should be normally distributed 
+in LMM parameter optimization relies on a Gaussian 'likelihood' function. 
+So, let's plot some quick model diagnostics to check this assumption.
+```{r}
+par(mfrow = c(2, 2))
+plot(respond_incorr_fixedLM)
+
+#this one was also almost normally distributed. Usually no transformation should be fine, but to make this comparible with the other 3, we did sqrt.
+
+par(mfrow = c(1,1))
+boxCox(respond_incorr_fixedLM)
+powerTransform(respond_incorr_fixedLM)
+
+#The likelihood function peaks near 0.5. According to the following guidelines, we'll do sqrt transformation
+  #   LAMBDA | TRANSFORMATION
+  #        2 = y^2
+  #        1 = no transformation
+  #      0.5 = sqrt(y)
+  #        0 = log(y)
+  #     -0.5 = 1/sqrt(y)
+  #       -1 = 1/y
+
+df_respond_green_incorr <- mutate(df_respond_green_incorr, sqrt_rt = sqrt(rt))
+
+# Let's check whether a model using sqrt_rt instead of RT has nicer residuals.
+respond_incorr_sqrt_LM <- lm(sqrt_rt ~ cond * run_id, data = df_respond_green_incorr)
+par(mfrow = c(2, 2))
+plot(respond_incorr_sqrt_LM)
+#still right skewed, but better.
+
+#let's also check the distributions of rts and the transformed sqrt_rt
+hist(df_respond_green_incorr$rt)
+hist(df_respond_green_incorr$sqrt_rt)
+```
+## Now the LMM specifications with the following effects:
+DV: sqrt_rt
+IV1: cond (BOTH, LVF, RVF), fixed effect
+IV2: random effects of subjects
+```{r}
+respond_incorr_lmm <- lmer(sqrt_rt ~ cond + (1|run_id), data = df_respond_green_incorr)
+summary(respond_incorr_lmm)
+confint(respond_incorr_lmm)
+```
+estimated effect size
+```{r}
+1.1746/ sqrt(0.651 + 13.758)
+```
+
+Checking pairwise comparisons of VF conditions
+```{r}
+emmeans(respond_incorr_lmm, list(pairwise ~ cond), adjust = "tukey")
+# nothing differs much 
+```
+
+
+```{r}
+  fixedEffects <- FEsim(respond_incorr_lmm, 1000)
+  fixedEffects <- fixedEffects %>%
+    mutate(lwr = mean - 1.96 * sd, 
+           upr = mean + 1.96 * sd)
+  
+    ggplot(fixedEffects, aes(x = term, y = mean, 
+                           ymin = lwr, ymax = upr)) +
+    geom_pointrange() + 
+    geom_hline(yintercept = 0, color = 'red') +
+    ylab('Posterior mean') + xlab('Term') +
+    coord_flip() +
+    theme_Publication()
+    
+    fixedEffects <- fixedEffects[-1,]
+    ggplot(fixedEffects, aes(x = term, y = mean, ymin = lwr, ymax = upr)) + 
+      geom_pointrange() + 
+      geom_hline(yintercept = 0, color = 'red') +
+      ylab('Posterior mean') + xlab('Term') +
+      coord_flip() + theme_Publication()
+```
+
+
+```{r}
+  modelEffects <- allEffects(respond_incorr_lmm)
+  modelEffects <- as.data.frame(modelEffects[[1]])  
+  ggplot(data = modelEffects, aes(x = cond, y = fit, 
+                                  ymin = lower, ymax = upper, 
+                                  colour = cond, group = cond)) +
+    geom_point() +
+    geom_line() +
+    geom_errorbar(width = 0.2) +
+    scale_color_discrete(name = 'VF Condition') +
+    ylab('Fit') + xlab('Condition') +
+    theme_Publication()
+```
+
+```{r}
+tab_model(inhibit_incorr_lmm_clean, p.val = 'kr', show.df = T)
+tab_model(inhibit_corr_lmm_clean, p.val = 'kr', show.df = T)
+
+tab_model(respond_corr_lmm_clean, p.val = 'kr', show.df = T)
+tab_model(respond_incorr_lmm, p.val = 'kr', show.df = T)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

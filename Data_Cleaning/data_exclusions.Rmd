@@ -1,0 +1,122 @@
+---
+title: "data_exclusions"
+author: 'Selin Bekir'
+date: 'March 16, 2022'
+output: html_notebook
+---
+
+#load packages
+```{r}
+require(dplyr)
+require(ggplot2)
+require(tidyr)
+require(stringr)
+```
+
+# load all-finished-runs.csv file
+## this csv file is exported from Cognition.run. Only the SONA IDs and IP addresses were deleted, before sharing the data public
+```{r}
+df <- read.csv('/divided_visual_field_go-no-go_task/Data/all-finished.csv')
+glimpse(df)
+```
+
+### EXCLUSIONS ###
+## BLOCKS ##
+# accuracy
+1. excluding all <.50 blocks
+```{r}
+#creating a separate data.frame for 
+df_acc_block_counts <- df %>% group_by(run_id, cond_order, accuracy == 1) %>% mutate(acc_block_counts = n())
+df_acc_block_counts <- filter(df_acc_block_counts, accuracy == 1)
+df_acc_block_counts <- subset(df_acc_block_counts, select = c(run_id, cond_order, acc_block_counts))
+df_acc_block_counts <- df_acc_block_counts[!duplicated(df_acc_block_counts), ]
+
+df <- merge(df, df_acc_block_counts, by=c("run_id", "cond_order"), all=T)
+
+#exclude all acc_count <30/60 blocks:
+df <- filter(df, acc_block_counts > 30)
+#summary(df_mains$acc_block_counts)
+```
+
+2. excluding maximizers in < .75 acc blocks
+```{r}
+#looking for potential maximizers in <.75 proportion correct blocks (45/60 trials)
+df_maxim <- filter(df, acc_block_counts <= 45)
+df_maxim <- df_maxim %>% group_by(run_id, cond_order, response) %>% mutate(response_counts = n())
+df_maxim <- subset(df_maxim, select = c(run_id, target_shown, main, cond_order, response, response_counts))
+df_maxim <- filter(df_maxim, target_shown == 'pink')
+df_maxim  <- df_maxim[!duplicated(df_maxim ), ]
+df_maxim_respond <- filter(df_maxim, main == 'respond')
+df_maxim_respond <- filter(df_maxim_respond, response == 'null')
+df_maxim_inhibit <- filter(df_maxim, main == 'inhibit')
+df_maxim_inhibit <- filter(df_maxim_inhibit, response == 'k')
+df_maximizers <- rbind(df_maxim_respond, df_maxim_inhibit)
+#put 1 for maximizers, 0 for none maximzers
+df_maximizers <- df_maximizers %>% mutate(maxim = case_when(response_counts >= 57 ~ 1,
+                                             response_counts < 57 ~ 0)) 
+df_maximizers <- subset(df_maximizers, select = c(run_id, cond_order, maxim ))
+df_maximizers <- filter(df_maximizers, maxim == 1)
+
+df <- merge(df, df_maximizers, by=c("run_id", "cond_order" ), all=T)
+df$maxim <- as.integer(as.logical(df$maxim))
+#only get the NAs i.e. non-maximizers
+df <- subset(df, is.na(maxim))
+df <- subset(df, select = -c(maxim))
+```
+
+#fixation
+excluding all blocks with < 55 fixation
+```{r}
+df$fixation_check <- as.numeric(df$fixation_check)
+#summary(df$fixation_check)
+df <- filter(df, fixation_check > 55)
+summary(df$fixation_check)
+```
+
+#excludingn participants who have less than 5 blocks remained
+```{r}
+df <- df %>% group_by(run_id) %>% mutate(trial_counts = n())
+df <- filter(df, trial_counts > 300)
+```
+
+checking the remaining sample size and sample size per condition
+```{r}
+n_distinct(df$run_id)
+#sample size per condition
+df %>%
+  group_by(main) %>%
+  summarise(count = n_distinct(run_id))
+
+#total trials per subject
+df %>%  group_by(run_id) %>% count(main)
+```
+##TRIALS##
+#rt <= 100 exclusions
+```{r}
+df <- filter(df, is.na(rt)| rt > 100)
+#summary(df$rt)
+```
+
+
+#writing it to a new csv file
+```{r}
+write.csv(df,"~/all-clean.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

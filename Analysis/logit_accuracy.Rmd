@@ -1,0 +1,89 @@
+---
+title: "Logistic Regression on Accuracy Scores"
+author: "Selin Bekir"
+date: "March 16, 2022"
+output: html_notebook
+---
+
+load packages
+```{r}
+require(aod)
+require(ggplot2)
+require(effects)
+library(dplyr)
+require(tidyverse)
+require(lme4)
+require(ggpubr)
+require(rstatix)
+require(emmeans)
+require(sjmisc)
+source('~/theme_Publication.R')
+require(sjPlot)
+require(sjlabelled)
+require(sjmisc)
+``` 
+
+```{r}
+df <- read.csv("~/divided_visual_field_go-no-go_task/Data/all-clean.csv")
+
+#only getting right-handed people
+df <- filter(df, handedness >= 20)
+
+#factoring the labels
+df <- df %>% mutate(run_id = factor(run_id)) 
+levels(df$main) <- c('inhibit', 'respond')
+levels(df$cond) <- c('LVF', 'BOTH', 'RVF')
+levels(df$target_shown)  <- c('pink', 'green')
+```
+
+# total sample size
+```{r}
+n_distinct(df$run_id)
+```
+
+### Logistic Regression ####
+DV: trial-by-trial accuracy scores (0-1)
+IV1, visual field condition: cond (BOTH, LVF, RVF), within-subject, fixed variable
+IV2, main version of the task: main (inhibit, respond), between-subject, fixed variable
+IV3, rare or common targets: target_shown (pink, green), within-subject, fixed variable
+IV4, subjects: run_id, subjects, random variable
+
+# Using GLMER #
+```{r}
+logit_glmer <- glmer(accuracy ~ cond * main * target_shown + (1|run_id), data=df, family=binomial(link=logit))
+summary(logit_glmer)
+```
+
+# table of estimates with 95% CI
+```{r}
+se <- sqrt(diag(vcov(logit_glmer)))
+(tab <- cbind(Est = fixef(logit_glmer), LL = fixef(logit_glmer) - 1.96 * se, UL = fixef(logit_glmer) + 1.96 * se))
+```
+
+#odd ratios
+```{r}
+odds <- exp(tab)
+odds
+```
+
+# odds ratio plots
+```{r}
+plot_model(logit_glmer, vline.color = 'gray', show.values = T, value.offset = .4, rm.terms = c('condLVF:mainrespond:target_shownpink', "condRVF:mainrespond:target_shownpink", "mainrespond:target_shownpink", "condRVF:target_shownpink", "condLVF:target_shownpink ")) +theme_Publication()
+```
+# probability plots
+```{r}
+plot_model(logit_glmer, transform = "plogis", show.values = T, value.offset = .4, rm.terms = c('condLVF:mainrespond:target_shownpink', "condRVF:mainrespond:target_shownpink", "mainrespond:target_shownpink"))
+```
+#overall effect of visual field seems to be significant, but what about the pairise comparisons between BOTH-LVF and RVF?
+```{r}
+emmeans(logit_glmer, list(pairwise ~ cond), adjust = "tukey")
+```
+
+```{r}
+plot(allEffects(logit_glmer))
+```
+
+
+
+
+
